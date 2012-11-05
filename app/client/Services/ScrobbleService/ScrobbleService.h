@@ -58,6 +58,9 @@ public slots:
     void onSessionChanged( const unicorn::Session& session );
     void onScrobble();
     void scrobbleSettingsChanged();
+#ifdef Q_WS_X11
+    void scrobbleIpod();
+#endif
 
 signals:
     void trackStarted( const Track& newTrack, const Track& oldTrack );
@@ -67,6 +70,7 @@ signals:
     void scrobblingOnChanged( bool scrobblingOn );
     void scrobblesCached( const QList<lastfm::Track>& tracks );
     void scrobblesSubmitted( const QList<lastfm::Track>& tracks );
+    void deviceScrobblerFinished();
 
     void foundIPodScrobbles( const QList<lastfm::Track>& tracks );
     void bootstrapReady( const QString& playerId );

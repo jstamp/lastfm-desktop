@@ -171,6 +171,14 @@ ScrobbleService::scrobbleSettingsChanged()
     emit scrobblingOnChanged( scrobblingOn );
 }
 
+#ifdef Q_WS_X11
+void
+ScrobbleService::scrobbleIpod()
+{
+    m_deviceScrobbler->onScrobbleIpodTriggered();
+}
+#endif
+
 void
 ScrobbleService::submitCache()
 {
@@ -205,6 +213,7 @@ ScrobbleService::resetScrobbler()
         m_deviceScrobbler = new DeviceScrobbler( this );
         connect( m_deviceScrobbler, SIGNAL(foundScrobbles(QList<lastfm::Track>)), SLOT(onFoundScrobbles(QList<lastfm::Track>)));
         connect( m_deviceScrobbler, SIGNAL(foundScrobbles(QList<lastfm::Track>)), SIGNAL(foundIPodScrobbles(QList<lastfm::Track>)));
+        connect( m_deviceScrobbler, SIGNAL(deviceScrobblerFinished()), SIGNAL(deviceScrobblerFinished()));
 
         // Do this a bit later to as it's nicer for the user and
         // it gives the main window time to be diplayed on boot

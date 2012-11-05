@@ -53,11 +53,15 @@ private slots:
 	void onScrobbleIPodClicked();
 	void onSendLogsClicked();
 	void poll();
+#ifdef Q_WS_X11
+    void stopTimer();
+#endif
 
 private:
     Ui::DiagnosticsDialog* ui;
     class DelayedLabelText* m_delay;
     QFile* m_ipod_log;
+    QTimer * m_timer;
 };
 
 

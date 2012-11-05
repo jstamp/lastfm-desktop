@@ -36,6 +36,9 @@
 #include <QDebug>
 #include <QHeaderView>
 #include <QProcess>
+#ifdef Q_WS_X11
+#include "Services/ScrobbleService.h"
+#endif
 
 DiagnosticsDialog::DiagnosticsDialog( QWidget *parent )
         : QDialog( parent ),
@@ -55,7 +58,7 @@ DiagnosticsDialog::DiagnosticsDialog( QWidget *parent )
     ui->tabs->removeTab( 0 );
 
 #ifdef Q_WS_X11
-    ui->tabs->removeTab( 0 );
+    ui->ipod_type->hide();
 #endif
 
 #ifdef Q_OS_MAC
@@ -222,6 +225,14 @@ DiagnosticsDialog::onScrobbleIPodClicked()
         // don't say anything; it was DoTwiddlyResult::Started
         break;
     }
+}
+
+
+void
+DiagnosticsDialog::stopTimer()
+{
+    m_timer->stop();
+    m_timer->deleteLater();
 }
 
 
