@@ -25,7 +25,6 @@
 #include "../Application.h"
 #include "lib/unicorn/widgets/Label.h"
 #include "lib/unicorn/dialogs/CloseAppsDialog.h"
-#include "IpodDevice.h"
 #include "DeviceScrobbler.h"
 #include "../Services/ScrobbleService/ScrobbleService.h"
 
@@ -472,7 +471,7 @@ DeviceScrobbler::startScrobbleThread( const QString& mountPath, QString serial )
 
     connect( iPod, SIGNAL( calculatingScrobbles() ), this, SLOT( onCalculatingScrobbles() ) );
     connect( iPod, SIGNAL( scrobblingCompleted( QList<lastfm::Track> ) ), this, SLOT( scrobbleIpodTracks( QList<lastfm::Track> ) ) );
-    connect( iPod, SIGNAL( errorOccurred(MediaDevice::Error) ), this, SLOT( onIpodScrobblingError(MediaDevice::Error) ) );
+    connect( iPod, SIGNAL( errorOccurred(IpodDeviceLinux::Error) ), this, SLOT( onIpodScrobblingError(IpodDeviceLinux::Error) ) );
 
     connect(m_thread, SIGNAL(started()), iPod, SLOT( fetchTracksToScrobble()) );
     connect(iPod, SIGNAL(finished()), iPod, SLOT(deleteLater()) );
@@ -556,21 +555,21 @@ DeviceScrobbler::scrobbleIpodTracks( QList<lastfm::Track> tracks )
 }
 
 void 
-DeviceScrobbler::onIpodScrobblingError(MediaDevice::Error error)
+DeviceScrobbler::onIpodScrobblingError(IpodDeviceLinux::Error error)
 {
     qDebug() << "iPod Error";
     qApp->restoreOverrideCursor();
     QString path;
     switch( error )
     {
-        case MediaDevice::AccessError:
+        case IpodDeviceLinux::AccessError:
             QMessageBoxBuilder( 0 )
                 .setIcon( QMessageBox::Critical )
                 .setTitle( tr( "Scrobble iPod" ) )
                 .setText( tr( "The iPod database could not be opened." ) )
                 .exec();
             break;
-        case MediaDevice::UnknownError:
+        case IpodDeviceLinux::UnknownError:
             QMessageBoxBuilder( 0 )
                 .setIcon( QMessageBox::Critical )
                 .setTitle( tr( "Scrobble iPod" ) )

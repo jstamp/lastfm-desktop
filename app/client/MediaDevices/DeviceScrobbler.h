@@ -27,7 +27,6 @@
 #include "lib/unicorn/UnicornSession.h"
 #include "lib/unicorn/UnicornSettings.h"
 #include <lastfm/User.h>
-#include "IpodDevice.h"
 
 #ifdef Q_WS_X11
 #include <QPointer>

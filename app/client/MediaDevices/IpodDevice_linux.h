@@ -20,18 +20,29 @@
 #ifndef IPOD_DEVICE_LINUX_H
 #define IPOD_DEVICE_LINUX_H
 
-#include "MediaDevice.h"
+#include <QObject>
+#include <lastfm/Track.h>
 
-class IpodDeviceLinux: public MediaDevice
+class IpodDeviceLinux: public QObject
 {
     Q_OBJECT
 
 public:
+    enum Error
+    {
+        NoError,
+        AccessError,
+        UnknownError
+    };
 
     IpodDeviceLinux( const QString& mountPath, const QString& deviceSerial = "" );
     ~IpodDeviceLinux();
 
 signals:
+    void deviceScrobblingStarted();
+    void calculatingScrobbles();
+    void scrobblingCompleted( QList<lastfm::Track> );
+    void errorOccurred(IpodDeviceLinux::Error);
     void finished();
 
 public slots:

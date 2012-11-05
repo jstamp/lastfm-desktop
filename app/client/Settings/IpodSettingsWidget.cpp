@@ -21,10 +21,6 @@
 #include "ui_IpodSettingsWidget.h"
 #include "IpodSettingsWidget.h"
 
-#ifdef Q_WS_X11
-#include "../MediaDevices/IpodDevice_linux.h"
-#endif
-
 #ifdef Q_OS_WIN
 #include "lib/unicorn/plugins/ITunesPluginInfo.h"
 #endif
@@ -32,8 +28,6 @@
 #include "lib/unicorn/UnicornApplication.h"
 #include "lib/unicorn/dialogs/CloseAppsDialog.h"
 #include "lib/unicorn/QMessageBoxBuilder.h"
-
-#include "../MediaDevices/IpodDevice.h"
 
 #include "lib/unicorn/UnicornSettings.h"
 #include "lib/unicorn/widgets/Label.h"

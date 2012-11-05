@@ -38,8 +38,6 @@ SOURCES += \
     Application.cpp \
     StationSearch.cpp \
     ScrobSocket.cpp \
-    MediaDevices/MediaDevice.cpp \
-    MediaDevices/IpodDevice.cpp \
     MediaDevices/DeviceScrobbler.cpp \
     MainWindow.cpp \
     main.cpp \
@@ -121,8 +119,6 @@ HEADERS += \
     Services/ScrobbleService/ScrobbleService.h \
     Services/RadioService.h \
     Services/RadioService/RadioService.h \
-    MediaDevices/MediaDevice.h \
-    MediaDevices/IpodDevice.h \
     MediaDevices/DeviceScrobbler.h \
     Dialogs/DiagnosticsDialog.h \
     Bootstrapper/PluginBootstrapper.h \
