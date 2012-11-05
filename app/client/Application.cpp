@@ -268,9 +268,13 @@ Application::init()
 
 
 #ifdef Q_WS_X11
-    menu->addSeparator();
-    m_scrobble_ipod_action = menu->addAction( tr( "Scrobble iPod..." ) );
-    connect( m_scrobble_ipod_action, SIGNAL( triggered() ), ScrobbleService::instance().deviceScrobbler(), SLOT( onScrobbleIpodTriggered() ) );
+    // Manual iPod scrobbling when there's no working mount watcher
+    if ( !ScrobbleService::instance().deviceScrobbler()->hasMonitor() )
+    {
+        menu->addSeparator();
+        m_scrobble_ipod_action = menu->addAction( tr( "Scrobble iPod..." ) );
+        connect( m_scrobble_ipod_action, SIGNAL( triggered() ), ScrobbleService::instance().deviceScrobbler(), SLOT( onScrobbleIpodTriggered() ) );
+    }
 #endif
 
     menu->addSeparator();

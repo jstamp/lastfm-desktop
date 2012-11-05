@@ -72,8 +72,8 @@ ScrobbleService::ScrobbleService()
 #endif
 
 #ifdef QT_DBUS_LIB
-        DBusListener* dbus = new DBusListener(mediator);
-        connect(dbus, SIGNAL(newConnection(PlayerConnection*)), m_mediator, SLOT(follow(PlayerConnection*)));
+        //DBusListener* dbus = new DBusListener(mediator);
+        //connect(dbus, SIGNAL(newConnection(PlayerConnection*)), m_mediator, SLOT(follow(PlayerConnection*)));
 #endif
     }
     catch(std::runtime_error& e){

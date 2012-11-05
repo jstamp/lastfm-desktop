@@ -229,12 +229,17 @@ unix:!mac {
     CONFIG += qdbus
 
     SOURCES += MediaDevices/IpodDevice_linux.cpp \
+               MediaDevices/HalMonitor.cpp \
+               MediaDevices/UdisksMonitor.cpp \
                Mpris2/Mpris2.cpp \
                Mpris2/DBusAbstractAdaptor.cpp \
                Mpris2/MediaPlayer2.cpp \
                Mpris2/MediaPlayer2Player.cpp
 
     HEADERS += MediaDevices/IpodDevice_linux.h \
+               MediaDevices/DeviceMonitor.h \
+               MediaDevices/HalMonitor.h \
+               MediaDevices/UdisksMonitor.h \
                Mpris2/Mpris2.h \
                Mpris2/DBusAbstractAdaptor.h \
                Mpris2/MediaPlayer2.h \

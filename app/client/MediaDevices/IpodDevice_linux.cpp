@@ -1,5 +1,7 @@
 /*
    Copyright 2005-2010 Last.fm Ltd.
+   Portions Copyright (c) 2012 Matěj Laitl <matej@laitl.cz>
+
       - Primarily authored by Max Howell, Jono Cole and Doug Mansell
 
    This file is part of the Last.fm Desktop Application Suite.
@@ -18,118 +20,177 @@
    along with lastfm-desktop.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "Application.h"
 #include "IpodDevice_linux.h"
 #include "lib/unicorn/QMessageBoxBuilder.h"
-#include "lib/unicorn/UnicornSettings.h"
 #include "lib/unicorn/UnicornSession.h"
 
-#include <QApplication>
-#include <QByteArray>
-#include <QFile>
 #include <QSqlError>
 #include <QSqlQuery>
-#include <QStringList>
+
+#define DB_NAME "playcounts.db"
 
 extern "C"
 {
+    #include <sys/utsname.h>
     #include <gpod/itdb.h>
     #include <glib.h>
 }
 
-IpodTracksFetcher::IpodTracksFetcher( Itdb_iTunesDB *itdb, QSqlDatabase scrobblesdb,
-                                      const QString& tableName, const QString& ipodModel )
-{
-    m_itdb = itdb;
-    m_tableName = tableName;
-    m_scrobblesdb = scrobblesdb;
-    m_ipodModel = ipodModel;
-}
 
-void
-IpodTracksFetcher::run()
-{
-    fetchTracks();
-    exec();
-}
+// =============================== //
 
-void
-IpodTracksFetcher::fetchTracks()
+// This section is taken from Amarok's IpodDeviceHelper.cpp
+
+static bool
+firewireGuidNeeded( const Itdb_IpodGeneration &generation )
 {
-    GList *cur;
-    for ( cur = m_itdb->tracks; cur; cur = cur->next )
+    switch( generation )
     {
-        Itdb_Track *iTrack = ( Itdb_Track * )cur->data;
-        if ( !iTrack )
-            continue;
-
-        int newPlayCount = iTrack->playcount - previousPlayCount( iTrack );
-        QDateTime time;
-        time.setTime_t( iTrack->time_played );
-
-        if ( time.toTime_t() == 0 )
-            continue;
-
-        QDateTime prevPlayTime = previousPlayTime( iTrack );
-
-        //this logic takes into account that sometimes the itdb track play count is not
-        //updated correctly (or libgpod doesn't get it right),
-        //so we rely on the track play time too, which seems to be right most of the time
-        if ( ( iTrack->playcount > 0 && newPlayCount > 0 ) || time > prevPlayTime )
-        {
-            Track lstTrack;
-            setTrackInfo( lstTrack, iTrack );
-
-            if ( newPlayCount == 0 )
-                newPlayCount++;
-
-            //add the track to the list as many times as the updated playcount.
-            for ( int i = 0; i < newPlayCount; i++ )
-            {
-                m_tracksToScrobble.append( lstTrack );
-            }
-
-            commit( iTrack );
-        }
+        // taken from libgpod itdb_device.c itdb_device_get_checksum_type()
+        // not nice, but should not change, no new devices use hash58
+        case ITDB_IPOD_GENERATION_CLASSIC_1:
+        case ITDB_IPOD_GENERATION_CLASSIC_2:
+        case ITDB_IPOD_GENERATION_CLASSIC_3:
+        case ITDB_IPOD_GENERATION_NANO_3:
+        case ITDB_IPOD_GENERATION_NANO_4:
+            return true; // ITDB_CHECKSUM_HASH58
+        default:
+            break;
     }
-    qDebug() << "tracks fetching finished";
-    exit();
+    return false;
+}
+
+static bool
+hashInfoNeeded( const Itdb_IpodGeneration &generation )
+{
+    switch( generation )
+    {
+        // taken from libgpod itdb_device.c itdb_device_get_checksum_type()
+        // not nice, but should not change, current devices need libhashab
+        case ITDB_IPOD_GENERATION_NANO_5:
+        case ITDB_IPOD_GENERATION_TOUCH_1:
+        case ITDB_IPOD_GENERATION_TOUCH_2:
+        case ITDB_IPOD_GENERATION_TOUCH_3:
+        case ITDB_IPOD_GENERATION_IPHONE_1:
+        case ITDB_IPOD_GENERATION_IPHONE_2:
+        case ITDB_IPOD_GENERATION_IPHONE_3:
+            return true; // ITDB_CHECKSUM_HASH72
+        default:
+            break;
+    }
+    return false;
+}
+
+/**
+ * Returns true if file @param relFilename is found, readable and nonempty.
+ * Searches in @param mountPoint /iPod_Control/Device/
+ */
+static bool
+fileFound( const QString &mountPoint, const QString &relFilename )
+{
+    gchar *controlDir = itdb_get_device_dir( QFile::encodeName( mountPoint ) );
+    if( !controlDir )
+        return false;
+    QString absFilename = QString( "%1/%2" ).arg( QFile::decodeName( controlDir ) )
+                                            .arg( relFilename );
+    g_free( controlDir );
+
+    QFileInfo fileInfo( absFilename );
+    return fileInfo.isReadable() && fileInfo.size() > 0;
+}
+
+
+// =============================== //
+
+
+class IpodDeviceLinuxPrivate
+{
+public:
+    IpodDeviceLinuxPrivate();
+    bool initIpod();
+    QSqlDatabase database() const;
+    void commit( Itdb_Track* iTrack );
+    void setTrackInfo( Track& lstTrack, Itdb_Track* iTrack, int scrobbleCount );
+    uint previousPlayCount( Itdb_Track* iTrack ) const;
+
+    Itdb_iTunesDB* itdb;
+    bool writable;
+    QSqlDatabase scrobblesDb;
+    QList<Track> tracksToScrobble;
+    QString sysname;
+    QString deviceId;
+    QString mountPath;
+    QString ipodModel;
+    IpodDeviceLinux::Error error;
+};
+
+
+IpodDeviceLinuxPrivate::IpodDeviceLinuxPrivate()
+{
+    itdb = NULL;
+    writable = true;
+    error = IpodDeviceLinux::NoError;
+    struct utsname unameData;
+    if ( uname( &unameData ) < 0 )
+        sysname = "Unix";
+    else
+        sysname = unameData.sysname;
 }
 
 void
-IpodTracksFetcher::setTrackInfo( Track& lstTrack, Itdb_Track* iTrack )
+IpodDeviceLinuxPrivate::setTrackInfo( Track& lstTrack, Itdb_Track* iTrack, int scrobbleCount )
 {
     MutableTrack( lstTrack ).setArtist( QString::fromUtf8( iTrack->artist ) );
+    MutableTrack( lstTrack ).setAlbumArtist( QString::fromUtf8( iTrack->albumartist ) );
     MutableTrack( lstTrack ).setAlbum( QString::fromUtf8( iTrack->album ) );
     MutableTrack( lstTrack ).setTitle( QString::fromUtf8( iTrack->title ) );
     MutableTrack( lstTrack ).setSource( Track::MediaDevice );
     if ( iTrack->mediatype & ITDB_MEDIATYPE_PODCAST )
         MutableTrack( lstTrack ).setPodcast( true );
 
+    bool video = (iTrack->mediatype & (ITDB_MEDIATYPE_MOVIE | ITDB_MEDIATYPE_TVSHOW)) &&
+                 !(iTrack->mediatype & ITDB_MEDIATYPE_MUSICVIDEO);
+    MutableTrack( lstTrack ).setVideo( video );
+
     QDateTime t;
     t.setTime_t( iTrack->time_played );
     MutableTrack( lstTrack ).setTimeStamp( t );
     MutableTrack( lstTrack ).setDuration( iTrack->tracklen / 1000 ); // set duration in seconds
 
-    MutableTrack( lstTrack ).setExtra( "playerName", "iPod " + m_ipodModel );
+    // FIXME: path?
+
+    MutableTrack( lstTrack ).setExtra( "uniqueId", lstTrack.artist() + '\t' + lstTrack.title() + '\t' + lstTrack.album() );
+    // FIXME: real dev name?
+    MutableTrack( lstTrack ).setExtra( "deviceId", "ipod-" + sysname );
+    MutableTrack( lstTrack ).setExtra( "playCount", QString::number( scrobbleCount ) );
 }
 
 void
-IpodTracksFetcher::commit( Itdb_Track* iTrack )
+IpodDeviceLinuxPrivate::commit( Itdb_Track* iTrack )
 {
-    QSqlQuery query( m_scrobblesdb );
-    QString sql = "REPLACE INTO " + m_tableName + " ( playcount, lastplaytime, id ) VALUES( %1, %2, %3 )";
+    QSqlQuery query( scrobblesDb );
+    QString queryStr = "INSERT OR REPLACE INTO itunes_db ( persistent_id, path, play_count ) "
+                       "VALUES ( ?, ?, ? );";
+    query.prepare( queryStr );
 
-    query.exec( sql.arg( iTrack->playcount ).arg( iTrack->time_played ).arg( iTrack->id  ) );
+    // using dbid because iTrack->id doesn't stay consistent between iPod syncs
+    query.addBindValue( QString::number(iTrack->dbid, 16).toUpper() );
+    // Also use the path like on Windows. This might prove useful if we want to
+    // deal with duplicate track titles.
+    query.addBindValue( QString( "%1\t%2\t%3" ).arg(iTrack->artist).arg(iTrack->title).arg(iTrack->album) );
+    query.addBindValue( iTrack->playcount );
+
+    query.exec();
     if( query.lastError().type() != QSqlError::NoError )
         qWarning() << query.lastError().text();
 }
 
 uint
-IpodTracksFetcher::previousPlayCount( Itdb_Track* track ) const
+IpodDeviceLinuxPrivate::previousPlayCount( Itdb_Track* track ) const
 {
-    QSqlQuery query( m_scrobblesdb );
-    QString sql = "SELECT playcount FROM " + m_tableName + " WHERE id=" + QString::number( track->id );
+    QSqlQuery query( scrobblesDb );
+    QString sql = "SELECT play_count FROM itunes_db WHERE persistent_id=\""
+        + QString::number( track->dbid, 16 ).toUpper() + "\";";
 
     query.exec( sql );
 
@@ -138,96 +199,33 @@ IpodTracksFetcher::previousPlayCount( Itdb_Track* track ) const
     return 0;
 }
 
-QDateTime
-IpodTracksFetcher::previousPlayTime( Itdb_Track* track ) const
-{
-    QSqlQuery query( m_scrobblesdb );
-    QString sql = "SELECT lastplaytime FROM " + m_tableName  + " WHERE id=" + QString::number( track->id );
-
-    query.exec( sql );
-
-    if( query.next() )
-        return QDateTime::fromTime_t( query.value( 0 ).toUInt() );
-    return QDateTime::fromTime_t( 0 );
-}
-
-IpodDeviceLinux::IpodDeviceLinux()
-    : m_itdb( 0 )
-    , m_mpl( 0 )
-    , m_tf( 0 )
-    , m_autodetected( false )
-    , m_error( NoError )
-{}
-
-
-IpodDeviceLinux::~IpodDeviceLinux()
-{
-    if ( m_itdb )
-    {
-        itdb_free( m_itdb );
-        itdb_playlist_free( m_mpl );
-    }
-
-    delete m_tf;
-}
-
-bool
-IpodDeviceLinux::deleteDeviceHistory( QString username, QString deviceId )
-{
-    QString const name = DB_NAME;
-    QSqlDatabase db = QSqlDatabase::database( name );
-    bool b = false;
-
-    if ( !db.isValid() )
-    {
-        db = QSqlDatabase::addDatabase( "QSQLITE", name );
-        db.setDatabaseName( lastfm::dir::runtimeData().filePath( name + ".db" ) );
-    }
-
-    db.open();
-
-    QSqlQuery q( db );
-    b = q.exec( "DROP TABLE " + username + "_" + deviceId );
-
-    if ( !b )
-        qWarning() << q.lastError().text();
-
-    return b;
-}
-
-bool
-IpodDeviceLinux::deleteDevicesHistory()
-{
-    QString const name = DB_NAME;
-    QString filePath = lastfm::dir::runtimeData().filePath( name + ".db" );
-    return QFile::remove( filePath );
-}
-
-
 QSqlDatabase
-IpodDeviceLinux::database() const
+IpodDeviceLinuxPrivate::database() const
 {
-    QString const name = DB_NAME;
+    QString const name = QString( DB_NAME ) + "_" + deviceId;
     QSqlDatabase db = QSqlDatabase::database( name );
 
     if ( !db.isValid() )
     {
         db = QSqlDatabase::addDatabase( "QSQLITE", name );
-        db.setDatabaseName( lastfm::dir::runtimeData().filePath( name + ".db" ) );
 
-        db.open();
-
-
+        if ( !deviceId.isEmpty() )
+        {
+            QDir dbDir = lastfm::dir::runtimeData().filePath( "devices/" + ipodModel + "/" + deviceId );
+            dbDir.mkpath( "." );
+            db.setDatabaseName( dbDir.filePath( DB_NAME ) );
+            db.open();
+        }
     }
 
-    if( !db.tables().contains( tableName() ) )
+    if( !db.tables().contains( "itunes_db" ) )
     {
         QSqlQuery q( db );
-        qDebug() << "table name: " << tableName();
-        bool b = q.exec( "CREATE TABLE " + tableName() + " ( "
-                         "id           INTEGER PRIMARY KEY, "
-                         "playcount    INTEGER, "
-                         "lastplaytime INTEGER )" );
+        bool b = q.exec( "CREATE TABLE itunes_db ( "
+                         "persistent_id VARCHAR( 32 ) PRIMARY KEY, "
+                         "path TEXT, "
+                         "play_count INTEGER );" );
+        q.exec( "CREATE INDEX persistent_id_idx ON itunes_db ( persistent_id );" );
         if ( !b )
             qWarning() << q.lastError().text();
     }
@@ -235,137 +233,191 @@ IpodDeviceLinux::database() const
     return db;
 }
 
-void
-IpodDeviceLinux::open()
+bool
+IpodDeviceLinuxPrivate::initIpod()
 {
-    QByteArray _mountpath = QFile::encodeName( mountPath() );
-    const char* mountpath = _mountpath.data();
+    QByteArray _mp = QFile::encodeName( mountPath );
+    const char* mp = _mp.data();
 
-    qDebug() << "mount path: " << mountPath();
-
-    m_itdb = itdb_new();
-    itdb_set_mountpoint( m_itdb, mountpath );
-    m_mpl = itdb_playlist_new( "iPod", false );
-    itdb_playlist_set_mpl( m_mpl );
     GError* err = 0;
-    m_itdb = itdb_parse( mountpath, &err );
-
+    itdb = itdb_parse( mp, &err );
     if ( err )
-        throw tr( "The iPod database could not be opened." );
-
-    if( m_deviceId.isEmpty() )
     {
-        const Itdb_IpodInfo* iPodInfo = itdb_device_get_ipod_info( m_itdb->device );
-        const gchar* ipodModel = itdb_info_get_ipod_model_name_string( iPodInfo->ipod_model );
-        m_ipodModel = QString( ipodModel );
-        m_deviceId = m_ipodModel.section( ' ', 0, 0 ) + "_" + QString::number( m_itdb->id );
+        qDebug() << "Error reading the iPod database:" << err->message;
+        g_error_free( err );
+        return false;
     }
 
+    const Itdb_IpodInfo * device = itdb_device_get_ipod_info( itdb->device );
+    if ( !device || device->ipod_model == ITDB_IPOD_MODEL_INVALID || device->ipod_model == ITDB_IPOD_MODEL_UNKNOWN )
+    {
+        itdb_free( itdb );
+        itdb = NULL;
+        qDebug() << "Unknown iPod model";
+        return false;
+    }
+
+    ipodModel = QString::fromUtf8( itdb_info_get_ipod_model_name_string( device->ipod_model ) ).split( " " ).first().toLower();
+    QString gen = QString::fromUtf8( itdb_info_get_ipod_generation_string( device->ipod_generation ) );
+
+    // This little section adapted from Amarok's IpodDeviceHelper.cpp
+    if( firewireGuidNeeded( device->ipod_generation ) )
+    {
+        // okay FireWireGUID may be in plain SysInfo, too, but it's hard to check and
+        // error-prone so we just require SysInfoExtended which is machine-generated
+        const QString sysInfoExtended( "SysInfoExtended" );
+        bool sysInfoExtendedExists = fileFound( mp, sysInfoExtended );
+        if( !sysInfoExtendedExists )
+        {
+            QString message = QString( "%1 family needs %2 file to generate correct database checksum." )
+                                .arg( gen ).arg(sysInfoExtended );
+            qDebug() << message;
+            writable = false;
+        }
+    }
+    if( hashInfoNeeded( device->ipod_generation ) )
+    {
+        const QString hashInfo( "HashInfo" );
+        bool hashInfoExists = fileFound( mp, hashInfo );
+        if( !hashInfoExists )
+        {
+            QString message = QString ( "%1 family needs %2 file to generate correct database checksum." )
+                                .arg( gen ).arg( hashInfo );
+            qDebug() << message;
+            writable = false;
+        }
+    }
+
+    // A manual scrobble...
+    if ( deviceId.isEmpty() )
+    {
+        deviceId = itdb_device_get_sysinfo( itdb->device, "FirewireGuid" );
+    }
+
+    return true;
 }
 
-const QList<Track>&
-IpodDeviceLinux::tracksToScrobble() const
+
+// =============================== //
+
+
+IpodDeviceLinux::IpodDeviceLinux( const QString& mountPath, const QString& deviceId )
+    : d( new IpodDeviceLinuxPrivate() )
 {
-    return m_tracksToScrobble;
+    d->mountPath = mountPath;
+    d->deviceId = deviceId;
+}
+
+
+IpodDeviceLinux::~IpodDeviceLinux()
+{
+    if ( d->itdb )
+    {
+        itdb_free( d->itdb );
+    }
+    if ( d->scrobblesDb.isValid() )
+        d->scrobblesDb.close();
+    delete d;
 }
 
 void
 IpodDeviceLinux::fetchTracksToScrobble()
 {
-    try
+    QTime time;
+    time.start();
+    qDebug() << QString( "Scrobbling device \'%1\' at mount path \'%2\'" ).arg( d->deviceId ).arg( d->mountPath );
+    if ( !d->initIpod() )
     {
-        open();
-    }
-    catch ( QString &error )
-    {
-        qDebug() << "Error initializing the device:" << error;
-        if ( m_autodetected )
-        {
-            m_error = AutodetectionError;
-        }
-        else
-        {
-            m_error = AccessError;
-        }
-        emit errorOccurred();
+        d->error = AccessError;
+        emit errorOccurred( d->error );
         return;
     }
     
-    emit calculatingScrobbles( itdb_tracks_number( m_itdb ) );
-    m_tf = new IpodTracksFetcher( m_itdb, database(), tableName(), m_ipodModel );
-    connect( m_tf, SIGNAL( finished() ), this, SLOT( onFinished() ) );
-    m_tf->start();
+    emit calculatingScrobbles();
 
-}
+    d->scrobblesDb = d->database();
 
-
-void
-IpodDeviceLinux::onFinished()
-{
-    m_error = NoError;
-    m_tracksToScrobble = m_tf->tracksToScrobble();
-    emit scrobblingCompleted( m_tracksToScrobble.count() );
-}
-
-QString
-IpodDeviceLinux::deviceName() const
-{
-    QStringList devPath = mountPath().split( "/", QString::SkipEmptyParts );
-    if ( !devPath.isEmpty() )
-        return devPath.last();
-    return QString();
-}
-
-QString
-IpodDeviceLinux::tableName() const
-{
-    audioscrobbler::Application* app = qobject_cast<audioscrobbler::Application* >( qApp );
-    if ( app )
+    GList *cur;
+    qDebug() << "Found " << itdb_tracks_number( d->itdb ) << " tracks in iTunes library";
+    for ( cur = d->itdb->tracks; cur; cur = cur->next )
     {
-        return app->currentSession().user().name() + "_" + m_deviceId;
-    }
-    return QString();
-}
+        Itdb_Track *iTrack = ( Itdb_Track * )cur->data;
+        if ( !iTrack )
+            continue;
 
-bool
-IpodDeviceLinux::autodetectMountPath()
-{
-    unicorn::UserSettings us;
-    int count = us.beginReadArray( "associatedDevices" );
+        // Compare a track's recent_playcount to the total playcount difference
+        // since the last scrobble attempt; scrobbleCount = whichever is
+        // smaller.  This is because we cannot guarantee that an iPod's
+        // recent_playcount can be reset.  It also lets us Play Well With
+        // Others, since other apps like Amarok might also be scrobbling the
+        // same device.  We avoid significant over-scrobbles this way.
+        int scrobbleCount = qMin( iTrack->recent_playcount,
+                                  iTrack->playcount - d->previousPlayCount( iTrack ) ) ;
 
-    if ( !count )
-        return false;
-
-    m_detectedDevices.clear();
-
-    DeviceInfo deviceInfo;
-    QString deviceId;
-    for ( int i = 0; i < count; i++ )
-    {
-        us.setArrayIndex( i );
-        deviceId = us.value( "deviceId" ).toString();
-        deviceInfo.prettyName = us.value( "deviceName" ).toString();
-        deviceInfo.mountPath = us.value( "mountPath" ).toString();
-        if ( QFile::exists( deviceInfo.mountPath ) )
+        if ( scrobbleCount > 0 )
         {
-            m_detectedDevices[ deviceId ] = deviceInfo;
+            Track lstTrack;
+            d->setTrackInfo( lstTrack, iTrack, scrobbleCount );
+            qDebug() << scrobbleCount << "scrobbles found for" << lstTrack;
+            d->tracksToScrobble.append( lstTrack );
         }
     }
-    us.endArray();
 
-    //No device detected or many, so user has to choose.
-    if ( m_detectedDevices.count() == 0 || m_detectedDevices.count() > 1 )
-    {
-        return false;
-    }
-
-    setMountPath( m_detectedDevices.values()[ 0 ].mountPath, true );
-    return true;
+    d->error = NoError;
+    qDebug() << "Procedure took:" << time.elapsed() << "milliseconds";
+    emit scrobblingCompleted( d->tracksToScrobble );
 }
 
 void
-IpodDeviceLinux::setMountPath( const QString &path, bool autodetected )
+IpodDeviceLinux::finish()
 {
-    m_mountPath = path;
-    m_autodetected = autodetected;
+    emit finished();
+}
+
+void
+IpodDeviceLinux::updateDbs()
+{
+    QTime time;
+    time.start();
+
+    if ( d->error != NoError )
+        return;
+
+    if ( d->scrobblesDb.isValid() )
+    {
+        GList *cur;
+        d->scrobblesDb.transaction();
+        for ( cur = d->itdb->tracks; cur; cur = cur->next )
+        {
+            Itdb_Track *iTrack = ( Itdb_Track * )cur->data;
+            if ( !iTrack )
+                continue;
+
+            d->commit( iTrack );
+        }
+        d->scrobblesDb.commit();
+    }
+
+    if ( d->writable )
+    {
+        GError * err = 0;
+        itdb_start_sync( d->itdb );
+        bool success = itdb_write( d->itdb, &err );
+        if ( !success )
+        {
+            QString errMsg( "Error writing iTunes database: " );
+            if ( err )
+            {
+                errMsg += err->message;
+                g_error_free( err );
+            }
+            else
+            {
+                errMsg += "(no error message)";
+            }
+            qDebug() << errMsg;
+        }
+        itdb_stop_sync( d->itdb );
+    }
+    qDebug() << "Updating local and device databases took" << time.elapsed() << "milliseconds.";
 }

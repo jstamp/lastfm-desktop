@@ -62,12 +62,8 @@ IpodSettingsWidget::IpodSettingsWidget( QWidget* parent )
     ui->alwaysAsk->setChecked( unicorn::AppSettings().alwaysAsk() );
     connect( ui->alwaysAsk, SIGNAL(clicked(bool)), SLOT(onSettingsChanged()));
 
-#ifdef Q_WS_X11
-    ui->deviceScrobblingEnabled->hide();
-#else
     ui->deviceScrobblingEnabled->setChecked( unicorn::OldeAppSettings().deviceScrobblingEnabled() );
     connect( ui->deviceScrobblingEnabled, SIGNAL(clicked(bool)), SLOT(onSettingsChanged()));
-#endif
 
     ui->note->setText( unicorn::Label::boldLinkStyle( tr( "<p>Using an iOS scrobbling app, like %1, may result in double scrobbles. Please only enable scrobbling in one of them.</p>"
                                                           "<p>iTunes Match synchronises play counts, but not last played times, across multiple devices. This will lead to duplicate scrobbles, at incorrect times. For now, we recommend iTunes Match users disable device scrobbling on desktop devices and scrobble iPhones/iPods using an iOS scrobbling app, like %1.</p>" ).arg( unicorn::Label::anchor( "itmss://itunes.apple.com/gb/app/scrobbler-for-ios/id585235199", "Scrobbler for iOS" ) ), Qt::black ) );
@@ -88,9 +84,9 @@ IpodSettingsWidget::saveSettings()
         // we need to restart iTunes for this setting to take affect
         bool currentlyEnabled = unicorn::OldeAppSettings().deviceScrobblingEnabled();
 
-#ifndef Q_WS_X11
         if ( currentlyEnabled != ui->deviceScrobblingEnabled->isChecked() )
         {
+#ifndef Q_WS_X11
 #ifdef Q_OS_WIN
             QList<unicorn::IPluginInfo*> plugins;
             unicorn::ITunesPluginInfo* iTunesPluginInfo = new unicorn::ITunesPluginInfo;
@@ -120,8 +116,10 @@ IpodSettingsWidget::saveSettings()
                         .setButtons( QMessageBox::Ok )
                         .exec();
             }
-        }
+#else // Q_WS_X11
+            unicorn::OldeAppSettings().setDeviceScrobblingEnabled( ui->deviceScrobblingEnabled->isChecked() );
 #endif
+        }
 
         onSettingsSaved();
     }

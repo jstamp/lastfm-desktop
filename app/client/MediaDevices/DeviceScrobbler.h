@@ -32,6 +32,7 @@
 #ifdef Q_WS_X11
 #include <QPointer>
 #include "IpodDevice_linux.h"
+#include "DeviceMonitor.h"
 #endif
 
 using unicorn::Session;
@@ -59,17 +60,23 @@ public:
 signals:
     void foundScrobbles( const QList<lastfm::Track>& tracks );
     void error( const QString& message );
+    void updateDbs();
+    void finishIpod();
+    void deviceScrobblerFinished();
 
 public slots:
 #ifdef Q_WS_X11
     void onScrobbleIpodTriggered();
+    void onDeviceMounted( const DeviceMonitor::DeviceInfo& dp );
+    void removeDeviceInfo();
 #endif
 
 private slots:
 #ifdef Q_WS_X11
-    void onCalculatingScrobbles( int trackCount );
-    void scrobbleIpodTracks( int trackCount );
-    void onIpodScrobblingError();
+    void onCalculatingScrobbles();
+    void scrobbleIpodTracks( QList<lastfm::Track> );
+    void onIpodScrobblingError(IpodDeviceLinux::Error);
+    void iterateDevices();
 #endif
     void twiddle();
     void onTwiddlyFinished( int, QProcess::ExitStatus );
@@ -81,20 +88,31 @@ private slots:
 public:
     void handleMessage( const QStringList& );
     void iPodDetected( const QStringList& arguments );
+#ifdef Q_WS_X11
+    bool hasMonitor();
+#endif
 
 private:
 #ifdef Q_WS_X11
-    QPointer<IpodDeviceLinux> iPod;
+    bool isIpod( QString path );
+    void startScrobbleThread( const QString& mountPath, QString serial = "" );
+    QString getIpodMountPath();
 #endif
     bool isITunesPluginInstalled();
 
     void twiddled( const QStringList& arguments );
     void scrobbleIpodFiles( const QStringList& files );
+    void finalizeScrobbles( QList<lastfm::Track>& tracks );
     QList<lastfm::Track> scrobblesFromFiles( const QStringList& files );
 
     lastfm::User associatedUser( QString deviceId );
 
 private:
+#ifdef Q_WS_X11
+    QList<DeviceMonitor::DeviceInfo> m_deviceInfo;
+    DeviceMonitor * m_deviceMonitor;
+    QPointer<QThread> m_thread;
+#endif
     QPointer<QProcess> m_twiddly;
     QTimer* m_twiddlyTimer;
     QPointer<ScrobbleConfirmationDialog> m_confirmDialog;

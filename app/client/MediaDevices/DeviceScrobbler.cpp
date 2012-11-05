@@ -31,6 +31,9 @@
 
 #ifdef Q_WS_X11
 #include <QFileDialog>
+#include <QThread>
+#include "HalMonitor.h"
+#include "UdisksMonitor.h"
 #endif
 #include <QDebug>
 #include <QDirIterator>
@@ -46,19 +49,37 @@
 #define BACKGROUND_CHECK_INTERVAL 30 * 60 * 1000
 #endif
 
-QString getIpodMountPath();
-
 DeviceScrobbler::DeviceScrobbler( QObject *parent )
     :QObject( parent )
 {
     connect( this, SIGNAL(error(QString)), aApp, SIGNAL(error(QString)));
 
+#ifndef Q_WS_X11
     m_twiddlyTimer = new QTimer( this );
     connect( m_twiddlyTimer, SIGNAL(timeout()), SLOT(twiddle()) );
     m_twiddlyTimer->start( BACKGROUND_CHECK_INTERVAL );
 
     // run once 3 seconds after starting up
     QTimer::singleShot( 3 * 1000, this, SLOT(twiddle()) );
+#else
+
+#ifdef Q_OS_LINUX // udisks is Linux-only
+    m_deviceMonitor = new UdisksMonitor( this );
+#else
+    m_deviceMonitor = new HalMonitor( this );
+#endif
+    if ( !m_deviceMonitor->isValid() )
+    {
+        delete m_deviceMonitor;
+        m_deviceMonitor = NULL;
+    }
+    else
+    {
+        connect( m_deviceMonitor, SIGNAL(deviceMounted(const DeviceMonitor::DeviceInfo&)),
+                 this, SLOT(onDeviceMounted(const DeviceMonitor::DeviceInfo&)) );
+    }
+
+#endif
 }
 
 DeviceScrobbler::~DeviceScrobbler()
@@ -149,6 +170,14 @@ DeviceScrobbler::onTwiddlyError( QProcess::ProcessError error )
 void 
 DeviceScrobbler::checkCachedIPodScrobbles()
 {
+    // This is a bit awkward, since there's no ipod scrobble cache for
+    // Q_WS_X11.  Instead, Q_WS_X11 uses this to check for plugged in devices
+    // on startup, then to set up connections to the mount watcher.
+    // Why use this at all for Q_WS_X11?  We want to take advantage of that 3
+    // second delay in ScrobbleService::resetScrobbler()
+
+#ifndef Q_WS_X11
+
     QStringList files;
 
     // check if there are any iPod scrobbles in its folder
@@ -173,6 +202,14 @@ DeviceScrobbler::checkCachedIPodScrobbles()
     }
 
     scrobbleIpodFiles( files );
+
+#else
+    if ( m_deviceMonitor )
+    {
+        onScrobbleIpodTriggered();
+        m_deviceMonitor->watchDeviceChanges();
+    }
+#endif
 }
 
 
@@ -331,36 +368,125 @@ DeviceScrobbler::onScrobblesConfirmationFinished( int result )
 }
 
 #ifdef Q_WS_X11
+bool
+DeviceScrobbler::hasMonitor()
+{
+    if ( m_deviceMonitor )
+        return true;
+    return false;
+}
+
 void 
 DeviceScrobbler::onScrobbleIpodTriggered() {
-    if ( iPod )
+    if ( m_deviceMonitor )
     {
-        qDebug() << "deleting ipod...";
-        delete iPod;
+        m_deviceMonitor->startupScan();
     }
-    qDebug() << "here";
-    iPod = new IpodDeviceLinux;
-    QString path;
-    bool autodetectionSuceeded = true;
-
-    if ( !iPod->autodetectMountPath() )
+    else
     {
-        path = getIpodMountPath();
-        iPod->setMountPath( path );
-        autodetectionSuceeded = false;
-    }
-
-    if ( autodetectionSuceeded || !path.isEmpty() )
-    {
-        connect( iPod, SIGNAL( scrobblingCompleted( int ) ), this, SLOT( scrobbleIpodTracks( int ) ) );
-        connect( iPod, SIGNAL( calculatingScrobbles( int ) ), this, SLOT( onCalculatingScrobbles( int ) ) );
-        connect( iPod, SIGNAL( errorOccurred() ), this, SLOT( onIpodScrobblingError() ) );
-        iPod->fetchTracksToScrobble();
+        QString mp = getIpodMountPath();
+        if ( isIpod( mp ) )
+            startScrobbleThread( mp );
+        else
+            QMessageBoxBuilder( 0 )
+                .setIcon( QMessageBox::Critical )
+                .setTitle( tr( "Scrobble iPod" ) )
+                .setText( tr( "The mount path does not appear to be an iPod." ) )
+                .exec();
     }
 }
 
+void
+DeviceScrobbler::iterateDevices()
+{
+    // One at a time, please
+    if ( m_thread && m_thread->isRunning() )
+        return;
 
-QString getIpodMountPath()
+    if ( m_deviceInfo.count() )
+    {
+        DeviceMonitor::DeviceInfo info = m_deviceInfo.first();
+        if ( isIpod( info.mountPath ) )
+        {
+            startScrobbleThread( info.mountPath, info.deviceId );
+        }
+        else
+        {
+            iterateDevices();
+        }
+    }
+    else
+    {
+        emit deviceScrobblerFinished();
+    }
+}
+
+void
+DeviceScrobbler::onDeviceMounted( const DeviceMonitor::DeviceInfo& info )
+{
+    QList<DeviceMonitor::DeviceInfo>::const_iterator i;
+    for ( i = m_deviceInfo.constBegin(); i != m_deviceInfo.constEnd(); ++i )
+    {
+        if ( info.mountPath == (*i).mountPath )
+            return;
+    }
+    m_deviceInfo.append( info );
+    iterateDevices();
+}
+
+void
+DeviceScrobbler::removeDeviceInfo()
+{
+    if ( m_deviceInfo.count() )
+        m_deviceInfo.removeFirst();
+}
+
+bool
+DeviceScrobbler::isIpod( QString path )
+{
+    if ( path.isEmpty() )
+        return false;
+    // Basic test to see if this is an iPod
+    QFileInfo fileInfo( path );
+    if ( fileInfo.isDir() &&
+         ( QFile::exists( path + "/iTunes_Control") ||
+           QFile::exists( path + "/iPod_Control") ||
+           QFile::exists( path + "/iTunes/iTunes_Control")
+         )
+       )
+    {
+        return true;
+    }
+    else
+        return false;
+}
+
+void
+DeviceScrobbler::startScrobbleThread( const QString& mountPath, QString serial )
+{
+    m_thread = new QThread( this );
+    IpodDeviceLinux * iPod = new IpodDeviceLinux( mountPath, serial );
+    iPod->moveToThread(m_thread);
+    qRegisterMetaType< QList<lastfm::Track> >("QList<lastfm::Track>");
+    qRegisterMetaType< IpodDeviceLinux::Error >("IpodDeviceLinux::Error");
+
+    connect( iPod, SIGNAL( calculatingScrobbles() ), this, SLOT( onCalculatingScrobbles() ) );
+    connect( iPod, SIGNAL( scrobblingCompleted( QList<lastfm::Track> ) ), this, SLOT( scrobbleIpodTracks( QList<lastfm::Track> ) ) );
+    connect( iPod, SIGNAL( errorOccurred(MediaDevice::Error) ), this, SLOT( onIpodScrobblingError(MediaDevice::Error) ) );
+
+    connect(m_thread, SIGNAL(started()), iPod, SLOT( fetchTracksToScrobble()) );
+    connect(iPod, SIGNAL(finished()), iPod, SLOT(deleteLater()) );
+    connect(iPod, SIGNAL(finished()), this, SLOT(removeDeviceInfo()) );
+    connect(iPod, SIGNAL(destroyed(QObject*)), m_thread, SLOT(quit()) );
+    connect(m_thread, SIGNAL(finished()), m_thread, SLOT(deleteLater()) );
+    connect(m_thread, SIGNAL(destroyed(QObject*)), this, SLOT(iterateDevices()) );
+    connect(this, SIGNAL(finishIpod()), iPod, SLOT(finish()) );
+    connect(this, SIGNAL(updateDbs()), iPod, SLOT(updateDbs()) );
+    m_thread->start();
+}
+
+QString
+DeviceScrobbler::getIpodMountPath()
 {
     QString path = "";
     QFileDialog dialog( 0, QObject::tr( "Where is your iPod mounted?" ), "/" );
@@ -379,134 +505,82 @@ QString getIpodMountPath()
 }
 
 void 
-DeviceScrobbler::onCalculatingScrobbles( int trackCount )
+DeviceScrobbler::onCalculatingScrobbles()
 {
     qApp->setOverrideCursor( Qt::WaitCursor );
 }
 
-void 
-DeviceScrobbler::scrobbleIpodTracks( int trackCount )
+void
+DeviceScrobbler::finalizeScrobbles( QList<lastfm::Track>& tracks )
 {
+    // sort the iPod scrobbles before caching them
+    if ( tracks.count() > 1 )
+        qSort ( tracks.begin(), tracks.end() );
+
+    emit updateDbs();
+    emit foundScrobbles( tracks );
+}
+
+void
+DeviceScrobbler::scrobbleIpodTracks( QList<lastfm::Track> tracks )
+{
+
     qApp->restoreOverrideCursor();
-    qDebug() << trackCount << " new tracks to scrobble.";
-
-    bool bootStrapping = false;
-    if ( iPod->lastError() != IpodDeviceLinux::NoError && !iPod->isDeviceKnown() )
-    {
-        bootStrapping = true;
-        qDebug() << "Should we save it?";
-        int result = QMessageBoxBuilder( 0 )
-            .setIcon( QMessageBox::Question )
-            .setTitle( tr( "Scrobble iPod" ) )
-            .setText( tr( "Do you want to associate the device %1 to your audioscrobbler user account?" ).arg( iPod->deviceName() ) )
-            .setButtons( QMessageBox::Yes | QMessageBox::No )
-            .exec();
-
-        if ( result == QMessageBox::Yes )
-        {
-            iPod->associateDevice();
-            QMessageBoxBuilder( 0 )
-                .setIcon( QMessageBox::Information )
-                .setTitle( tr( "Scrobble iPod" ) )
-                .setText( tr( "Device successfully associated to your user account. "
-                            "From now on you can scrobble the tracks you listen on this device." ) )
-                .exec();
-
-        }
-        else
-        {
-            IpodDeviceLinux::deleteDeviceHistory( qobject_cast<unicorn::Application*>( qApp )->currentSession().user().name(), iPod->deviceId() );
-        }
-    }
-
-    QList<lastfm::Track> tracks = iPod->tracksToScrobble();
+    qDebug() << tracks.count() << "new tracks to scrobble.";
 
     if ( tracks.count() )
     {
-        if ( !bootStrapping )
+        if( unicorn::AppSettings().alwaysAsk() )
         {
-            if( unicorn::UserSettings().value( "confirmIpodScrobbles", false ).toBool() )
+            ScrobbleConfirmationDialog confirmDialog( tracks );
+            if ( confirmDialog.exec() == QDialog::Accepted )
             {
-                qDebug() << "showing confirm dialog";
-                ScrobbleConfirmationDialog confirmDialog( tracks );
-                if ( confirmDialog.exec() == QDialog::Accepted )
-                {
-                    tracks = confirmDialog.tracksToScrobble();
-
-                    // sort the iPod scrobbles before caching them
-                    if ( tracks.count() > 1 )
-                        qSort ( tracks.begin(), tracks.end() );
-
-                    emit foundScrobbles( tracks );
-                }
-            }
-            else
-            {
-                // sort the iPod scrobbles before caching them
-                if ( tracks.count() > 1 )
-                    qSort ( tracks.begin(), tracks.end() );
-
-                emit foundScrobbles( tracks );
-                QMessageBoxBuilder( 0 )
-                    .setIcon( QMessageBox::Information )
-                    .setTitle( tr( "Scrobble iPod" ) )
-                    .setText( tr( "%1 tracks scrobbled." ).arg( tracks.count() ) )
-                    .exec();
+                tracks = confirmDialog.tracksToScrobble();
+                finalizeScrobbles( tracks );
             }
         }
+        else
+        {
+            finalizeScrobbles( tracks );
+        }
     }
-    else if ( !iPod->lastError() )
+    else
     {
         QMessageBoxBuilder( 0 )
             .setIcon( QMessageBox::Information )
             .setTitle( tr( "Scrobble iPod" ) )
             .setText( tr( "No tracks to scrobble since your last sync." ) )
             .exec();
-        qDebug() << "No tracks to scrobble";
     }
-    delete iPod;
-    iPod = 0;
+    emit finishIpod();
 }
 
 void 
-DeviceScrobbler::onIpodScrobblingError()
+DeviceScrobbler::onIpodScrobblingError(MediaDevice::Error error)
 {
     qDebug() << "iPod Error";
     qApp->restoreOverrideCursor();
     QString path;
-    switch( iPod->lastError() )
+    switch( error )
     {
-        case IpodDeviceLinux::AutodetectionError: //give it another try
-            qDebug() << "giving another try";
-            path = getIpodMountPath();
-            if ( !path.isEmpty() )
-            {
-                iPod->setMountPath( path );
-                iPod->fetchTracksToScrobble();
-            }
-            break;
-
-        case IpodDeviceLinux::AccessError:
+        case MediaDevice::AccessError:
             QMessageBoxBuilder( 0 )
                 .setIcon( QMessageBox::Critical )
                 .setTitle( tr( "Scrobble iPod" ) )
                 .setText( tr( "The iPod database could not be opened." ) )
                 .exec();
-            delete iPod;
-            iPod = 0;
             break;
-        case IpodDeviceLinux::UnknownError:
+        case MediaDevice::UnknownError:
             QMessageBoxBuilder( 0 )
                 .setIcon( QMessageBox::Critical )
                 .setTitle( tr( "Scrobble iPod" ) )
                 .setText( tr( "An unknown error occurred while trying to access the iPod database." ) )
                 .exec();
-            delete iPod;
-            iPod = 0;
             break;
         default:
-            qDebug() << "untracked error:" << iPod->lastError();
+            qDebug() << "untracked error";
     }
+    emit finishIpod();
 }
 
 #endif

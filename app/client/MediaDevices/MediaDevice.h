@@ -32,55 +32,20 @@ class MediaDevice: public QObject
     Q_OBJECT
 
 public:
+    enum Error
+    {
+        NoError,
+        AccessError,
+        UnknownError
+    };
+
     MediaDevice();
-
-    /**
-     * Associates the device to an user account.
-     * @param username the user name to associate the device to. If no user name is provided the
-     * device gets associated to the current user logged in.
-     * @return true if it succeeds, false otherwise.
-     */
-    bool associateDevice( QString username = "" );
-
-    /**
-     * @return the last error ocurred or empty string if there wasn't any.
-     */
-    QString lastError() const { return m_error; }
-
-    /**
-     * @return an unique ID for the device.
-     */
-    virtual QString deviceId() const = 0;
-
-    /**
-     * @return the device name.
-     */
-    virtual QString deviceName() const = 0;
-
-
-#ifdef Q_WS_X11
-    /**
-     * @return The mount path of the device.
-     */
-    virtual QString mountPath() const = 0;
-#endif
-
-    /**
-     * @return true if the device is already associated with the user account, false otherwise.
-     */
-    bool isDeviceKnown() const;
-
-    static lastfm::User associatedUser( const QString deviceId );
 
 signals:
     void deviceScrobblingStarted();
-    void calculatingScrobbles( int trackCount );
-    void scrobblingCompleted( int trackCount );
-    void errorOccurred();
-
-protected:
-    QString m_error;
+    void calculatingScrobbles();
+    void scrobblingCompleted( QList<lastfm::Track> );
+    void errorOccurred(MediaDevice::Error);
 };
-
 
 #endif // MEDIA_DEVICE_H
